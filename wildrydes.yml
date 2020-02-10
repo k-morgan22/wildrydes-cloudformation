@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Template for serverless wild rydes app
+
+Resources:
+  SiteBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: unique-name-here
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  SiteBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument: 
+        Version: 2012-10-17
+        Statement: 
+          Effect: Allow 
+          Principal: "*"
+          Action: s3:GetObject
+          Resource: !Sub arn:aws:s3:::${SiteBucket}/*
+
+  UserPool:
+    Type: "AWS::Cognito::UserPool"
+    Properties:
+      AliasAttributes:
+          - email
+      AutoVerifiedAttributes: 
+          - email
+      UserPoolName: WildRydes
+
+  UserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      ClientName: WildRydesWebApp
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+      
+  DynamoDB:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        - 
+          AttributeName: "RideId"
+          AttributeType: "S"
+      KeySchema:
+        - 
+          AttributeName: "RideId"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      TableName: Rides
+
+  DynamodbRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument: 
+        Version: 2012-10-17
+        Statement:
+          - 
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - 
+          PolicyName: "dynamodbWriteAccess"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - 
+                Effect: Allow
+                Action:
+                  - "dynamodb:PutItem"
+                Resource: 
+                  - !GetAtt DynamoDB.Arn
+
+  RequestUnicornFunct:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: path-to-file/requestUnicorn.js
+      FunctionName: requestUnicorn
+      Handler: requestUnicorn.handler
+      MemorySize: 128
+      Role: !GetAtt DynamodbRole.Arn
+      Runtime: nodejs10.x
+
+  RestApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      EndpointConfiguration:
+        Types:
+          - EDGE 
+      Name: wildRydes
+
+  CognitoAuthorizer:
+    Type: "AWS::ApiGateway::Authorizer"
+    Properties:
+      IdentitySource: method.request.header.Authorization
+      Name: wildRydes
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+      RestApiId: !Ref RestApi
+      Type: COGNITO_USER_POOLS
+
+  ApiResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: ride
+      RestApiId: !Ref RestApi
+
+  ApiMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RequestUnicornFunct.Arn}/invocations
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true 
+      ResourceId: !Ref ApiResource
+      RestApiId: !Ref RestApi
+
+  OptionsMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH 
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        Type: MOCK 
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: 'Empty'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+      ResourceId: !Ref ApiResource
+      RestApiId: !Ref RestApi
+
+  ApiPermissions:
+    DependsOn: RequestUnicornFunct
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: requestUnicorn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/POST/ride
+
+  ApiDeploy:
+    DependsOn: ApiMethod
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref RestApi 
+      StageName: prod
+
+
+
+Outputs:
+  WebsiteURL:
+    Value: !GetAtt SiteBucket.WebsiteURL
+    Description: URL for static site hosted on s3
+  UserPoolId: 
+    Value: !Ref UserPool
+    Description: User pool id 
+  UserPoolClientId: 
+    Value: !Ref UserPoolClient
+    Description: App client id
+  RestApiId:
+    Value: !Ref RestApi 
+    Description: Rest API Id 
+  AuthorizerId:
+    Value: !Ref CognitoAuthorizer
+    Description: Authorizer id
+  InvokeUrl:
+    Value: !Sub https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
